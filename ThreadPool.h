@@ -10,6 +10,7 @@
 #include <future>
 #include <functional>
 #include <stdexcept>
+#include <atomic>
 
 class ThreadPool {
 public:
@@ -18,6 +19,8 @@ public:
     auto enqueue(F&& f, Args&&... args) 
         -> std::future<typename std::result_of<F(Args...)>::type>;
     ~ThreadPool();
+
+    void join();
 private:
     // need to keep track of threads so we can join them
     std::vector< std::thread > workers;
@@ -28,12 +31,16 @@ private:
     std::mutex queue_mutex;
     std::condition_variable condition;
     bool stop;
+    std::atomic<size_t> work_cnt;
+    std::mutex join_mutex;
+    std::condition_variable join_condition;
 };
  
 // the constructor just launches some amount of workers
 inline ThreadPool::ThreadPool(size_t threads)
     :   stop(false)
 {
+    work_cnt = 0;
     for(size_t i = 0;i<threads;++i)
         workers.emplace_back(
             [this]
@@ -51,8 +58,11 @@ inline ThreadPool::ThreadPool(size_t threads)
                         task = std::move(this->tasks.front());
                         this->tasks.pop();
                     }
-
+                    
+                    work_cnt++;
                     task();
+                    work_cnt--;
+                    join_condition.notify_one();
                 }
             }
         );
@@ -81,6 +91,11 @@ auto ThreadPool::enqueue(F&& f, Args&&... args)
     }
     condition.notify_one();
     return res;
+}
+
+void ThreadPool::join(){
+    std::unique_lock<std::mutex> lock(this->join_mutex);
+    this->join_condition.wait(lock, [this]{ return this->work_cnt.load() == 0 && this->tasks.empty(); });
 }
 
 // the destructor joins all threads
